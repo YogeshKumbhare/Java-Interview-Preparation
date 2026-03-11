@@ -692,8 +692,8 @@ String greeting = "Hello " + name; // NOT optimized — StringBuilder used at ru
 ### Q: What does this print?
 ```java
 System.out.println('b' + 'i' + 't');
-// Answer: 325 (NOT "bit")
-// WHY: char + char = int arithmetic: 98 + 105 + 116 = 325
+// Answer: 319 (NOT "bit")
+// WHY: char + char = int arithmetic: 98 + 105 + 116 = 319
 // FIX: System.out.println("" + 'b' + 'i' + 't'); → prints "bit"
 ```
 
