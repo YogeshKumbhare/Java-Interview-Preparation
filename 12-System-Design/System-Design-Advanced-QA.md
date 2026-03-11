@@ -7,30 +7,44 @@
 
 ## 📖 System Design Foundations — Must Know Before Any Interview
 
-### CAP Theorem
+### CAP Theorem & PACELC (Deep Dive)
+**CAP Theorem (Brewer's Theorem)** states that a distributed data store can only simultaneously provide **two of the following three** guarantees:
+
+1. **C - Consistency**: Every read receives the most recent write or an error. (All nodes see the same data at the same time).
+2. **A - Availability**: Every request receives a (non-error) response, without the guarantee that it contains the most recent write. (System remains operational even if nodes go down).
+3. **P - Partition Tolerance**: The system continues to operate despite an arbitrary number of messages being dropped (or delayed) by the network between nodes.
+
+**The Reality of Distributed Systems:**
+Because network failures (partitions) are unavoidable in distributed systems, **Partition Tolerance (P) is non-negotiable**. Therefore, when a partition occurs, a system must choose between **Consistency (CP)** or **Availability (AP)**.
+
 ```
-You can only guarantee TWO of three properties in a distributed system:
-
-C - Consistency: Every read returns the most recent write
-A - Availability: Every request receives a response (no errors)
-P - Partition Tolerance: System works despite network partitions
-
          C
         / \
        /   \
-   CP /     \ CA
+   CP /     \ CA (Does not exist in distributed systems)
      /       \
     P ─────── A
         AP
-
-Real-world choices:
-  CP: MongoDB, HBase, Redis (reject writes during partition)
-  AP: Cassandra, DynamoDB, CouchDB (serve stale data during partition)
-  CA: Traditional RDBMS (single node — no partition to tolerate)
-
-In practice: Partition tolerance is NON-NEGOTIABLE in distributed systems.
-So the real choice is: CP vs AP.
 ```
+
+#### Real-World Trade-offs:
+*   **CP (Consistent & Partition Tolerant):** System will return an error or timeout if it cannot guarantee up-to-date data.
+    *   *Examples:* MongoDB (if primary goes down, writes are blocked until a new primary is elected), HBase, ZooKeeper, etcd.
+    *   *Use Case:* Financial transactions, banking, billing systems where stale data is unacceptable.
+*   **AP (Available & Partition Tolerant):** System always returns a response, but it might be stale data.
+    *   *Examples:* Cassandra, DynamoDB, CouchDB, Riak.
+    *   *Use Case:* Social media feeds, shopping carts, analytics where returning *some* data is better than an error.
+*   **CA (Consistent & Available):** Can only happen in single-node systems (like a traditional RDBMS: MySQL/PostgreSQL running on a single machine without replication over a network). Once you distribute, CA is impossible.
+
+#### Beyond CAP: The PACELC Theorem
+For senior engineers (12+ YOE), CAP is often considered too simplistic because it only describes behavior *during a network partition*. **PACELC** extends CAP to describe behavior under normal operations:
+
+> **If there is a Partition (P)**, how does the system trade off **Availability (A)** and **Consistency (C)**?
+> **Else (E)** (when the system is running normally without partitions), how does the system trade off **Latency (L)** and **Consistency (C)**?
+
+*   **DynamoDB / Cassandra:** **PA/EL** (Prefers Availability during Partition. Under normal operation, prefers Latency over Consistency).
+*   **MongoDB:** **PC/EC** (Prefers Consistency during Partition. Under normal operation, prefers Consistency over Latency).
+*   **VoltDB / Spanner:** **PC/EC** (Strong consistency focus).
 
 ### Consistent Hashing
 ```
