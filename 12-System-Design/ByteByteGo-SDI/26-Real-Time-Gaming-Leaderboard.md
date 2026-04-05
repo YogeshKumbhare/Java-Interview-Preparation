@@ -4,7 +4,7 @@ In this chapter, we are going to walk through the challenge of designing a leade
 
 What is a leaderboard? Leaderboards are common in gaming and elsewhere to show who is leading a particular tournament or competition. Users are assigned points for completing tasks or challenges, and whoever has the most points is at the top of the leaderboard. Figure 1 shows an example of a mobile game leaderboard. The leaderboard shows the ranking of the leading competitors and also displays the position of the user on it.
 
-![Figure 1](images/ch26/figure-1.png)
+![Figure 1](images/ch26/figure-1.svg)
 **Figure 1 Leaderboard**
 
 ## Step 1 - Understand the Problem and Establish Design Scope
@@ -140,7 +140,7 @@ Sample response:
 
 The high-level design diagram is shown in Figure 2. There are two services in this design. The game service allows users to play the game and the leaderboard service creates and displays a leaderboard.
 
-![Figure 2](images/ch26/figure-2.png)
+![Figure 2](images/ch26/figure-2.svg)
 **Figure 2 High-level design**
 
 - When a player wins a game, the client sends a request to the game service.
@@ -154,7 +154,7 @@ Before settling on this design, we considered a few alternatives and decided aga
 
 Should the client talk to the leaderboard service directly?
 
-![Figure 3](images/ch26/figure-3.png)
+![Figure 3](images/ch26/figure-3.svg)
 **Figure 3 Who sets the leaderboard score**
 
 In the alternative design, the score is set by the client. This option is not secure because it is subject to man-in-the-middle attack [x], where players can put in a proxy and change scores at will. Therefore, we need the score to be set on the server-side.
@@ -165,7 +165,7 @@ Do we need a message queue between the game service and the leaderboard service?
 
 The answer to this question highly depends on how the game scores are used. If the data is used in other places or supports multiple functionalities, then it might make sense to put data in Kafka as shown in Figure 4. This way, the same data can be consumed by multiple consumers, such as leaderboard service, analytics service, push notification service, etc. This is especially true when the game is a turn-based or multi-player game in which we need to notify other players about the score update. As this is not an explicit requirement based on the conversation with the interviewer, we do not use a message queue in our design.
 
-![Figure 4](images/ch26/figure-4.png)
+![Figure 4](images/ch26/figure-4.svg)
 **Figure 4 Game scores are used by multiple services**
 
 ### Data models
@@ -187,7 +187,7 @@ In reality, the leaderboard table has additional information, such as a game_id,
 
 A user wins a point:
 
-![Figure 6](images/ch26/figure-6.png)
+![Figure 6](images/ch26/figure-6.svg)
 **Figure 6 A user wins a point**
 
 Assume every score update would be an increment of 1. If a user doesn’t yet have an entry in the leaderboard for the month, the first insert would be:
@@ -204,7 +204,7 @@ UPDATE leaderboard set score=score + 1 where user_id='mary1934';
 
 Find a user’s leaderboard position:
 
-![Figure 7](images/ch26/figure-7.png)
+![Figure 7](images/ch26/figure-7.svg)
 **Figure 7 Find a user’s leaderboard position**
 
 To fetch the user rank, we would sort the leaderboard table and rank by the score:
@@ -264,12 +264,12 @@ A skip list is a list structure that allows for fast search. It consists of a ba
 
 How can we make those operations faster? One idea is to get to the middle quickly, as the binary search algorithm does. To achieve that, we add a level 1 index that skips every other node, and then a level 2 index that skips every other node of the level 1 indexes. We keep introducing additional levels, with each new level skipping every other nodes of the previous level. We stop this addition when the distance between nodes is n/2 - 1, where n is the total number of nodes. As shown in Figure 9, searching for number 45 is a lot faster when we have multi-level indexes.
 
-![Figure 9](images/ch26/figure-9.png)
+![Figure 9](images/ch26/figure-9.svg)
 **Figure 9 Skip list**
 
 When the data set is small, the speed improvement using the skip list isn’t obvious. Figure 10 shows an example of a skip list with 5 levels of indexes. In the base linked list, it needs to travel 62 nodes to reach the correct node. In the skip list, it only needs to traverse 11 nodes [2].
 
-![Figure 10](images/ch26/figure-10.png)
+![Figure 10](images/ch26/figure-10.svg)
 **Figure 10 Skip list with 5 levels of indexes**
 
 Sorted sets are more performant than a relational database because each element is automatically positioned in the right order during insert or update, as well as the fact that the complexity of an add or find operation in a sorted set is logarithmic: O(logn).
@@ -339,7 +339,7 @@ ZREVRANK leaderboard_feb_2021 'mary1934'
 
 4. Fetch the relative position in the leaderboard for a user. An example is shown in Figure 14.
 
-![Figure 14](images/ch26/figure-14.png)
+![Figure 14](images/ch26/figure-14.svg)
 **Figure 14 Fetch 4 players above and below**
 
 While not an explicit requirement, we can easily fetch the relative position for a user by leveraging ZREVRANGE with the number of results above and below the desired player. For example, if user Mallow007’s rank is 361 and we want to fetch 4 players above and below them, we would run the following command.
@@ -416,7 +416,7 @@ Fixed partition
 
 One way to understand fixed partitions is to look at the overall range of points on the leaderboard. Let’s say that the number of points won in one month ranges from 1 to 1000, and we break up the data by range. For example, we could have 10 shards and each shard would have a range of 100 scores (For example, 1-100, 101-200, 201-300, ...) as shown in Figure 18.
 
-![Figure 18](images/ch26/figure-18.png)
+![Figure 18](images/ch26/figure-18.svg)
 **Figure 18 Fixed partition**
 
 For this to work, we want to ensure there is an even distribution of scores across the leaderboard. Otherwise, we need to adjust the score range in each shard to make sure of a relatively even distribution. In this approach, we shard the data ourselves in the application code.

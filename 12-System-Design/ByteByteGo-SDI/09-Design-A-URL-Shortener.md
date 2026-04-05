@@ -69,7 +69,7 @@ GET api/v1/shortUrl
 
 Figure 1 shows what happens when you enter a tinyurl onto the browser. Once the server receives a tinyurl request, it changes the short URL to the long URL with 301 redirect.
 
-![Figure 1 – URL Redirecting](images/ch09/figure-1.png)
+![Figure 1 – URL Redirecting](images/ch09/figure-1.svg)
 
 One thing worth discussing here is **301 redirect vs 302 redirect**:
 
@@ -104,7 +104,7 @@ Up until now, we have discussed the high-level design of URL shortening and URL 
 
 In the high-level design, everything is stored in a hash table. This is a good starting point; however, this approach is not feasible for real-world systems as memory resources are limited and expensive. A better option is to store `<shortURL, longURL>` mapping in a relational database. The simplified version of the table contains 3 columns: id, shortURL, longURL.
 
-![Figure 4 – Database Table](images/ch09/figure-4.png)
+![Figure 4 – Database Table](images/ch09/figure-4.svg)
 
 ### Hash function
 
@@ -141,7 +141,7 @@ Even the shortest hash value (from CRC32) is too long (more than 7 characters).
 
 The first approach is to collect the first 7 characters of a hash value; however, this method can lead to hash collisions. To resolve hash collisions, we can recursively append a new predefined string until no more collision is discovered.
 
-![Figure 5 – Hash Collision Resolution](images/ch09/figure-5.png)
+![Figure 5 – Hash Collision Resolution](images/ch09/figure-5.svg)
 
 This method can eliminate collision; however, it is expensive to query the database to check if a shortURL exists for every request. A technique called **bloom filters** can improve performance. A bloom filter is a space-efficient probabilistic technique to test if an element is a member of a set.
 

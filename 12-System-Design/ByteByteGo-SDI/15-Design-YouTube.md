@@ -134,7 +134,7 @@ Two parts of encoding formats:
 
 To support different video processing pipelines and maintain high parallelism, we use a DAG programming model (inspired by Facebook's streaming video engine).
 
-![Figure 8 – DAG Model](images/ch15/figure-8.png)
+![Figure 8 – DAG Model](images/ch15/figure-8.svg)
 
 Tasks on a video file:
 - **Inspection**: Ensure videos are of good quality.
@@ -144,7 +144,7 @@ Tasks on a video file:
 
 ### Video transcoding architecture
 
-![Figure 10 – Transcoding Architecture](images/ch15/figure-10.png)
+![Figure 10 – Transcoding Architecture](images/ch15/figure-10.svg)
 
 Six main components: preprocessor, DAG scheduler, resource manager, task workers, temporary storage, and encoded video.
 

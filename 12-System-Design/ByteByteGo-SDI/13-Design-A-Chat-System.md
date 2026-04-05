@@ -62,12 +62,12 @@ For the **receiver side**, since HTTP is client-initiated, it is not trivial to 
 #### Polling
 The client periodically asks the server if there are messages available. Could be costly.
 
-![Figure 3 – Polling](images/ch13/figure-3.png)
+![Figure 3 – Polling](images/ch13/figure-3.svg)
 
 #### Long polling
 The client holds the connection open until there are actually new messages available or a timeout threshold has been reached.
 
-![Figure 4 – Long Polling](images/ch13/figure-4.png)
+![Figure 4 – Long Polling](images/ch13/figure-4.svg)
 
 Long polling drawbacks:
 - Sender and receiver may not connect to the same chat server.
@@ -78,7 +78,7 @@ Long polling drawbacks:
 
 WebSocket is the most common solution for sending asynchronous updates from server to client.
 
-![Figure 5 – WebSocket](images/ch13/figure-5.png)
+![Figure 5 – WebSocket](images/ch13/figure-5.svg)
 
 WebSocket connection is initiated by the client. It is **bi-directional** and **persistent**. It starts its life as an HTTP connection and could be "upgraded" via well-defined handshake to a WebSocket connection.
 
@@ -213,7 +213,7 @@ The online status is changed to offline in the KV store.
 
 A naive approach (marking user offline on every disconnect) would make the presence indicator change too often. We introduce a **heartbeat mechanism**: the client sends a heartbeat event to presence servers every 5 seconds. If presence servers receive a heartbeat within x seconds, the user is considered online.
 
-![Figure 18 – Heartbeat Mechanism](images/ch13/figure-18.png)
+![Figure 18 – Heartbeat Mechanism](images/ch13/figure-18.svg)
 
 #### Online status fanout
 

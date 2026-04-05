@@ -87,7 +87,7 @@ Dr. Dean from Google reveals the length of typical computer operations in 2010 [
 - 1 µs = 10^-6 seconds = 1,000 ns
 - 1 ms = 10^-3 seconds = 1,000 µs = 1,000,000 ns
 
-![Figure 1 – Visualized Latency Numbers](images/ch03/figure-1.png)
+![Figure 1 – Visualized Latency Numbers](images/ch03/figure-1.svg)
 
 *Figure 1: Visualization of latency numbers as of 2020 – colored squares proportional to operation duration.*
 

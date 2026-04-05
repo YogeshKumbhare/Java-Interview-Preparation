@@ -4,7 +4,7 @@
 
 In this chapter, you are asked to design a news feed system. According to the Facebook help page, "News feed is the constantly updating list of stories in the middle of your home page." This is a popular interview question. Similar questions: design Facebook news feed, Instagram feed, Twitter timeline, etc.
 
-![Figure 1 – News Feed Example](images/ch12/figure-1.png)
+![Figure 1 – News Feed Example](images/ch12/figure-1.svg)
 
 ---
 
@@ -96,7 +96,7 @@ Fanout is the process of delivering a post to all friends. Two types of fanout m
 
 **Hybrid approach**: Push model for the majority of users. For celebrities/users with many followers, let followers pull content on-demand.
 
-![Figure 5 – Fanout Service](images/ch12/figure-5.png)
+![Figure 5 – Fanout Service](images/ch12/figure-5.svg)
 
 The fanout service works as follows:
 1. Fetch friend IDs from the graph database.
@@ -122,7 +122,7 @@ Media content (images, videos, etc.) are stored in CDN for fast retrieval.
 
 ### Cache architecture
 
-![Figure 8 – Cache Architecture](images/ch12/figure-8.png)
+![Figure 8 – Cache Architecture](images/ch12/figure-8.svg)
 
 | Cache Layer | Description |
 |-------------|-------------|
