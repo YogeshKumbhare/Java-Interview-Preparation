@@ -2,135 +2,287 @@
 
 > Source: [ByteByteGo - System Design Interview](https://bytebytego.com/courses/system-design-interview/google-maps)
 
-Design a simplified version of Google Maps — covering map rendering, location tracking, and navigation (ETA/route planning).
+In this chapter, we design a simple version of Google Maps. Google started Project Google Maps in 2005 and developed a web mapping service. It provides satellite imagery, street maps, real-time traffic conditions, and route planning.
+
+Google Maps had one billion daily active users (March 2021), 99% coverage of the world, and 25 million updates daily.
 
 ---
 
-## Step 1 - Understand the problem and establish design scope
+## Map 101
 
-**Features:** User location update, navigation (ETA + routes), map rendering.
+### Positioning system
 
-**Non-functional:** Accuracy for navigation, smooth rendering, low data usage, available in areas with weak network, High availability and scalability.
+- **Latitude (Lat)**: denotes how far north or south we are
+- **Longitude (Long)**: denotes how far east or west we are
 
-**Estimations:** 1 billion DAU, 5 million users daily navigation, GPS updated every second during navigation.
+### Going from 3D to 2D
+
+The process of translating points from a 3D globe to a 2D plane is called **Map Projection**. Google Maps uses a modified version of Mercator projection called **Web Mercator**.
+
+### Geocoding
+
+Geocoding is the process of converting addresses to geographic coordinates. For example: "1600 Amphitheatre Parkway, Mountain View, CA" → (latitude 37.423021, longitude -122.083739).
+
+Reverse geocoding: lat/lng pair → human-readable address.
+
+### Geohashing
+
+Geohashing encodes a geographic area into a short string of letters and digits. Earth is treated as a flattened surface and recursively divided into grids.
+
+### Map rendering
+
+One foundational concept in map rendering is **tiling**. Instead of rendering the entire map as one large image, the world is broken into smaller tiles. The client downloads only relevant tiles for the area the user is in and stitches them together.
+
+### Road data processing for navigation algorithms
+
+Most routing algorithms are variations of **Dijkstra's** or **A* pathfinding** algorithms. These operate on a graph where intersections are nodes and roads are edges.
+
+**Routing tiles**: By employing a subdivision technique similar to geohashing, the world is divided into small grids. Roads within each grid are converted into a small graph data structure (nodes = intersections, edges = roads).
+
+**Hierarchical routing tiles**: Three sets of routing tiles at different levels:
+1. Most detail: small tiles with only local roads
+2. Medium: larger tiles with arterial roads connecting districts
+3. Least detail: large tiles with major highways connecting cities/states
 
 ---
 
-## Step 2 - High-level design
+## Step 1 - Understand the Problem and Establish Design Scope
 
-### Map 101
+**Candidate**: How many daily active users?
+**Interviewer**: 1 billion DAU.
 
-- **Positioning system**: GPS for location
-- **Map rendering**: Use pre-rendered map tiles at various zoom levels
-- **Routing**: Graph-based shortest path (Dijkstra's / A*)
-- **Geocoding**: Convert address to lat/lng and vice versa
+**Candidate**: Which features should we focus on?
+**Interviewer**: Location update, navigation, ETA, and map rendering.
 
-### Routing algorithms
+**Candidate**: How large is the road data?
+**Interviewer**: Terabytes of raw data.
 
-- The road network is modeled as a **graph** where intersections are nodes and roads are edges
-- Weights = time/distance
-- Use **Dijkstra's algorithm** or **A*** for shortest path
-- **Routing tiles**: Pre-partition the world into tiles at different resolution levels (local roads, arterial roads, highway) for hierarchical routing
+**Candidate**: Should our system take traffic conditions into consideration?
+**Interviewer**: Yes.
 
-### High-level components
+**Focus features:**
+- User location update
+- Navigation service, including ETA service
+- Map rendering
 
-1. **Location Service**: Receives and stores user GPS data (write-heavy, Kafka → DB)
-2. **Map Tile Service**: Serves pre-rendered map tiles from CDN
-3. **Navigation Service**: Computes optimal routes using routing tiles
-4. **Ranking Service**: Ranks multiple routes (fastest, shortest, no tolls)
+**Non-functional requirements:**
+- Accuracy: Users should not be given the wrong directions.
+- Smooth navigation: very smooth map rendering on client-side.
+- Data and battery usage: as little data and battery as possible.
+- High availability and scalability.
 
-### Java Example – Shortest Path Navigation
+**Back-of-the-envelope estimation:**
+
+*Storage usage:*
+- Zoom level 21: ~4.4 trillion tiles × 100KB → 440 PB at highest zoom
+- After compression (~80-90% reduction for water/terrain): ~50 PB
+- Total across all zoom levels: ~100 PB
+
+*Server throughput:*
+- 1B DAU, 35 min navigation/week → 5B min/day
+- GPS every 15 seconds batch: **200,000 QPS** (baseline), **1 million QPS** peak
+
+---
+
+## Step 2 - High-Level Design
+
+![Figure 7 – High-level Design](images/ch19/figure-7.png)
+
+Three main service flows:
+
+### Location Service
+
+Client sends location updates every `t` seconds. Location data buffered on client and sent in batch (e.g., every 15 seconds).
+
+```
+POST /v1/locations
+Parameters:
+  locs: JSON encoded array of (latitude, longitude, timestamp) tuples.
+```
+
+Database choice: **Cassandra** (high write volume, horizontally scalable).
+
+Data consumed from Kafka by downstream services (live traffic, routing tile updates).
+
+### Navigation Service
+
+```
+GET /v1/nav?origin=1355+market+street,SF&destination=Disneyland
+```
+
+Response includes distance, duration, html_instructions, polyline, travel_mode.
+
+### Map Rendering
+
+Pre-generated static map tiles served via CDN. Tile URL based on geohash:
+```
+https://cdn.map-provider.com/tiles/9q9hvu.png
+```
+
+---
+
+## Step 3 - Design Deep Dive
+
+### Data model
+
+**Routing tiles**: Stored in object storage (S3), organized by geohash. Fetched on demand by routing algorithms.
+
+**User location data (Cassandra):**
+
+| key (user_id) | timestamp | lat | long | user_mode | navigation_mode |
+|---------------|-----------|-----|------|-----------|-----------------|
+| 51 | 132053000 | 21.9 | 89.8 | active | driving |
+
+Partition key: `user_id`, clustering key: `timestamp`. Efficiently retrieves location for a user in a time range.
+
+**Geocoding database (Redis):** Fast reads for address → lat/lng conversion.
+
+**Precomputed map tiles:** Stored on CDN backed by Amazon S3.
+
+### Location service (deep dive)
+
+Location data consumed by multiple services via Kafka:
+- Live traffic service → updates live traffic database
+- Routing tile processing service → detects new/closed roads
+- Other analytics services
+
+![Figure 15 – Kafka Usage](images/ch19/figure-15.png)
+
+### Map rendering (deep dive)
+
+**Precomputed tiles at 21 zoom levels:**
+- Level 0: entire world as single 256×256 pixel tile
+- Each increment: number of tiles doubles in both directions (4× total)
+
+**Optimization: Use vectors (WebGL)**
+- Vector tiles compress much better than images
+- Better zooming experience (no pixelation)
+
+### Navigation service (deep dive)
+
+Components:
+
+**Geocoding service**: Resolves address to lat/lng (Google Geocoding API format).
+
+**Route planner service**: Computes optimal route considering current traffic.
+
+**Shortest-path service**: Runs A* algorithm against routing tiles in object storage.
+1. Convert lat/lng to geohash → load routing tiles
+2. Traverse graph, hydrate neighboring tiles on demand
+3. Return top-k shortest paths
+
+**ETA service**: Uses ML to predict ETAs based on current traffic + historical data.
+
+**Ranker service**: Applies user filters (avoid tolls, avoid freeways) and ranks routes fastest → slowest.
+
+**Updater services (Kafka consumers):**
+- Routing tile processing service: new/closed roads → updated routing tiles
+- Traffic update service: location streams → live traffic database
+
+### Adaptive ETA and rerouting
+
+To support real-time rerouting, the server tracks actively navigating users and their routing tiles:
+
+```
+user_1: r_1, r_2, r_3, ..., r_k
+user_2: r_4, r_6, r_9, ..., r_n
+```
+
+**Optimized approach**: Store current + hierarchical parent tiles per user. To find affected users when `r_2` has a traffic incident, check if `r_2` is within a user's last routing tile entry — filters out many users quickly.
+
+**Delivery protocols:**
+- Mobile push notification: too limited (max 4KB)
+- Long polling: less efficient
+- **WebSocket**: preferred ✅ (bi-directional real-time communication)
+
+![Figure 21 – Final Design](images/ch19/figure-21.png)
+
+### Java Example – Routing with Dijkstra
 
 ```java
 import java.util.*;
 
-public class NavigationService {
+public class MapRouter {
 
-    record Edge(String to, double weight) {} // weight = travel time in minutes
+    record Edge(String to, int weight) {}
 
     private final Map<String, List<Edge>> graph = new HashMap<>();
 
-    public void addRoad(String from, String to, double travelTime) {
+    public void addRoad(String from, String to, int travelTime) {
         graph.computeIfAbsent(from, k -> new ArrayList<>()).add(new Edge(to, travelTime));
         graph.computeIfAbsent(to, k -> new ArrayList<>()).add(new Edge(from, travelTime));
     }
 
-    // Dijkstra's shortest path
-    public List<String> findRoute(String start, String end) {
-        Map<String, Double> dist = new HashMap<>();
-        Map<String, String> prev = new HashMap<>();
-        PriorityQueue<String> pq = new PriorityQueue<>(Comparator.comparing(n -> dist.getOrDefault(n, Double.MAX_VALUE)));
+    public Map<String, Integer> dijkstra(String start) {
+        Map<String, Integer> dist = new HashMap<>();
+        PriorityQueue<int[]> pq = new PriorityQueue<>(Comparator.comparingInt(a -> a[1]));
 
-        dist.put(start, 0.0);
-        pq.add(start);
+        dist.put(start, 0);
+        pq.offer(new int[]{start.hashCode(), 0});
+
+        Map<Integer, String> hashToNode = new HashMap<>();
+        graph.keySet().forEach(n -> hashToNode.put(n.hashCode(), n));
+        hashToNode.put(start.hashCode(), start);
 
         while (!pq.isEmpty()) {
-            String current = pq.poll();
-            if (current.equals(end)) break;
-
-            for (Edge edge : graph.getOrDefault(current, List.of())) {
-                double newDist = dist.get(current) + edge.weight();
-                if (newDist < dist.getOrDefault(edge.to(), Double.MAX_VALUE)) {
+            int[] curr = pq.poll();
+            String node = hashToNode.get(curr[0]);
+            int currDist = curr[1];
+            if (currDist > dist.getOrDefault(node, Integer.MAX_VALUE)) continue;
+            for (Edge edge : graph.getOrDefault(node, List.of())) {
+                int newDist = currDist + edge.weight();
+                if (newDist < dist.getOrDefault(edge.to(), Integer.MAX_VALUE)) {
                     dist.put(edge.to(), newDist);
-                    prev.put(edge.to(), current);
-                    pq.add(edge.to());
+                    hashToNode.put(edge.to().hashCode(), edge.to());
+                    pq.offer(new int[]{edge.to().hashCode(), newDist});
                 }
             }
         }
-
-        // Reconstruct path
-        List<String> path = new ArrayList<>();
-        for (String at = end; at != null; at = prev.get(at)) path.add(0, at);
-        return path.get(0).equals(start) ? path : List.of();
+        return dist;
     }
 
     public static void main(String[] args) {
-        NavigationService nav = new NavigationService();
-        nav.addRoad("Home", "Gas Station", 5);
-        nav.addRoad("Home", "Park", 3);
-        nav.addRoad("Park", "Mall", 4);
-        nav.addRoad("Gas Station", "Mall", 2);
-        nav.addRoad("Mall", "Office", 6);
-        nav.addRoad("Gas Station", "Office", 10);
+        MapRouter router = new MapRouter();
+        router.addRoad("A", "B", 5);
+        router.addRoad("B", "C", 3);
+        router.addRoad("A", "C", 10);
+        router.addRoad("C", "D", 2);
 
-        List<String> route = nav.findRoute("Home", "Office");
-        System.out.println("Route: " + String.join(" → ", route));
-        System.out.println("ETA: ~" + route.size() * 3 + " minutes"); // simplified
+        Map<String, Integer> distances = router.dijkstra("A");
+        System.out.println("Shortest distances from A:");
+        distances.forEach((node, dist) ->
+            System.out.println("  A -> " + node + ": " + dist + " minutes"));
     }
 }
 ```
 
 ---
 
-## Step 3 - Design deep dive
+## Step 4 - Wrap Up
 
-### Map rendering
-- Map tiles pre-rendered at 21+ zoom levels
-- Stored in CDN for fast delivery
-- Client downloads only visible tiles based on viewport
+Designed a simplified Google Maps with:
+- **Location service** (Cassandra + Kafka)
+- **Navigation service** (geocoding, route planning, ETA, ranking)
+- **Map rendering** (CDN with precomputed tiles, vector optimization)
+- **Adaptive ETA** with real-time rerouting via WebSocket
 
-### Location service
-- High write volume → use Kafka to buffer GPS data
-- Store location history in Cassandra (write-optimized)
-- Used for ETA prediction, traffic analysis
-
-### Navigation service - Routing tiles
-- Divide world into hierarchical routing tiles (3 levels):
-  - **Local**: Small roads within a city block
-  - **Regional**: Arterial roads connecting neighborhoods
-  - **Highway**: Interstate/highway-level connections
-- Route calculation spans multiple tile levels for long-distance routes
-
-### Adaptive ETA
-- Use real-time traffic data + historical patterns
-- Machine learning models predict travel time
+**Future extension**: Multi-stop navigation — finding optimal order to visit multiple destinations (helpful for delivery services like DoorDash, Uber).
 
 ---
 
-## Step 4 - Wrap up
+## Reference materials
 
-Additional talking points:
-- **Delivery routes optimization** (multi-stop TSP)
-- **Transit/walking/cycling directions**
-- **3D/satellite view**
-- **Offline maps**: Download tiles for areas ahead of time
+[1] Google Maps: https://developers.google.com/maps?hl=en_US
+[2] Google Maps Platform: https://cloud.google.com/maps-platform/
+[3] Stamen Design: http://maps.stamen.com
+[4] OpenStreetMap: https://www.openstreetmap.org
+[5] Prototyping a Smoother Map: https://medium.com/google-design/google-maps-cb0326d165f5
+[6-9] Map Projections (Wikipedia)
+[10] Address geocoding: https://en.wikipedia.org/wiki/Address_geocoding
+[11] Geohashing: https://kousiknath.medium.com/system-design-design-a-geo-spatial-index-for-real-time-location-search-10968fe62b9c
+[12] HTTP keep-alive: https://en.wikipedia.org/wiki/HTTP_persistent_connection
+[13] Directions API: https://developers.google.com/maps/documentation/directions/start
+[14] Adjacency list: https://en.wikipedia.org/wiki/Adjacency_list
+[15] CAP theorem: https://en.wikipedia.org/wiki/CAP_theorem
+[16] ETAs with GNNs: https://deepmind.com/blog/article/traffic-prediction-with-advanced-graph-neural-networks
+[17] Google Maps 101: https://blog.google/products/maps/google-maps-101-how-ai-helps-predict-traffic-and-determine-routes/

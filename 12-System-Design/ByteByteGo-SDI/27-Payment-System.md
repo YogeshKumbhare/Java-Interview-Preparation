@@ -2,149 +2,235 @@
 
 > Source: [ByteByteGo - System Design Interview](https://bytebytego.com/courses/system-design-interview/payment-system)
 
-Design a payment system like Stripe, PayPal, or a payment backend for an e-commerce platform.
+In this chapter, we design a payment system. E-commerce has exploded in popularity. A reliable, scalable, and flexible payment system is essential.
 
 ---
 
-## Step 1 - Understand the problem and establish design scope
+## Step 1 - Understand the Problem and Establish Design Scope
 
-**Features:** Pay-in flow (receive money from customers), Pay-out flow (send money to sellers/merchants). Support multiple payment methods (credit card, bank transfer, digital wallets).
+- **Type**: Payment backend for e-commerce like Amazon (pay-in and pay-out flows)
+- **Payment**: Credit cards via third-party PSPs (Stripe, Braintree, Square)
+- **Storage**: No sensitive card data stored locally
+- **Scale**: Global, 1 million transactions/day, one currency in interview
+- **Reconciliation**: Required between internal and external services
 
-**Non-functional:** Reliability (no double charge, no lost payment), exactly-once processing, data consistency, fault tolerance.
+**Functional requirements:**
+- Pay-in flow: receive money from customers on behalf of sellers
+- Pay-out flow: send money to sellers around the world
 
-**Estimations:** 1 million transactions/day, ~12 TPS average, peak 5x = 60 TPS.
+**Non-functional requirements:**
+- Reliability and fault tolerance
+- Reconciliation process
+
+**Back-of-the-envelope:**
+- 1M txns/day = 10 TPS — focus is on correctness, not throughput
 
 ---
 
-## Step 2 - High-level design
+## Step 2 - High-Level Design
 
-### Pay-in flow
-1. User places order on e-commerce site
-2. Payment service creates a payment event
-3. Payment service calls Payment Service Provider (PSP) — Stripe/Adyen
-4. PSP processes with card network (Visa/Mastercard) and bank
-5. PSP returns result → Payment service updates status
-6. Wallet service / ledger updated
+**Pay-in flow components:**
 
-### Pay-out flow
-1. Seller requests withdrawal
-2. Payment service initiates payout via PSP
-3. Money transferred to seller's bank account
+- **Payment service**: Accepts payment events, performs risk check (AML/CFT), coordinates process
+- **Payment executor**: Executes single payment order via PSP
+- **PSP (Payment Service Provider)**: Moves money from buyer credit card
+- **Card schemes**: Visa, MasterCard, Discovery
+- **Ledger**: Financial record of payment transactions
+- **Wallet**: Merchant account balance
 
-### Key components
+**Typical pay-in flow:**
+1. User clicks "place order" → payment event to payment service
+2. Payment service stores event in DB
+3. Payment service calls payment executor for each order
+4. Payment executor stores order, calls PSP
+5. Payment service updates wallet (seller balance)
+6. Payment service calls ledger
 
-- **Payment Service**: Orchestrates payment flow
-- **PSP (Payment Service Provider)**: Stripe, Adyen, Braintree
-- **Ledger**: Double-entry bookkeeping for every transaction
-- **Wallet**: Stores merchant/seller account balances
+### APIs
 
-### Java Example – Payment Processing
+**POST /v1/payments** — Execute a payment event
+
+Fields: `buyer_info`, `checkout_id`, `credit_card_info`, `payment_orders`
+
+payment_orders: `seller_account`, `amount` (string!), `currency` (ISO 4217), `payment_order_id`
+
+> Amount is `string` not `double` to avoid floating-point precision errors.
+
+**GET /v1/payments/{:id}** — Get execution status
+
+### Data Model
+
+**Payment event table:** `checkout_id` (PK), `buyer_info`, `seller_info`, `credit_card_info`, `is_payment_done`
+
+**Payment order table:** `payment_order_id` (PK), `buyer_account`, `amount`, `currency`, `checkout_id` (FK), `payment_order_status` (NOT_STARTED → EXECUTING → SUCCESS/FAILED), `ledger_updated`, `wallet_updated`
+
+### Double-entry Ledger
+
+| Account | Debit | Credit |
+|---------|-------|--------|
+| buyer | $1 | |
+| seller | | $1 |
+
+Sum = 0. Every payment is debit one account, credit another.
+
+### Pay-out Flow
+
+Uses third-party pay-out providers (Tipalti) to move money from e-commerce bank → seller's bank.
+
+---
+
+## Step 3 - Design Deep Dive
+
+### PSP Integration
+
+**Hosted payment page flow:**
+1. User clicks checkout → payment service gets payment order info
+2. Payment service sends registration to PSP (amount, currency, redirect URL, UUID nonce)
+3. PSP returns token (unique PSP-side payment ID)
+4. Payment service stores token
+5. Client displays PSP-hosted page (Stripe.js captures card, never reaches our servers)
+6. User fills card details → PSP processes payment
+7. PSP returns status → browser redirects to redirect URL
+8. **Async**: PSP calls payment service webhook with final status
+
+### Reconciliation
+
+- Last line of defense when async communication fails
+- PSPs/banks send daily **settlement files**
+- Reconciliation system compares settlement file with ledger
+
+**Mismatch resolution:**
+1. Classifiable + auto-fixable → engineers automate
+2. Classifiable, not auto-fixable → finance team job queue
+3. Unclassifiable → finance team investigates
+
+### Handling Payment Delays
+
+When PSP deems a payment high risk or 3D Secure Authentication required:
+- PSP returns pending status → client displays to user
+- PSP notifies payment service via webhook when resolved
+- OR payment service polls PSP for status updates
+
+### Communication Among Internal Services
+
+- **Synchronous (HTTP)**: Simple but poor failure isolation, tight coupling
+- **Asynchronous (Kafka)**: Preferred for large-scale — scalability + failure resilience
+
+### Handling Failed Payments
+
+- **Retry queue**: Retryable errors (network errors, timeouts)
+- **Dead letter queue**: After MAX_RETRIES exceeded, for debugging
+
+**Retry strategies:**
+- Immediate retry
+- Fixed intervals
+- Incremental intervals
+- **Exponential backoff**: 1s → 2s → 4s ⭐
+- Cancel (permanent failures)
+
+### Exactly-Once Delivery
+
+= at-least-once (retry) + at-most-once (idempotency)
+
+**Idempotency key**: UUID added to HTTP header `idempotency-key: <value>`
+
+Scenario 1 (double click): Second request with same idempotency key → 429 Too Many Requests
+
+Scenario 2 (network failure): Same nonce → same PSP token → PSP identifies duplicate, returns previous status
+
+### Consistency
+
+- Exactly-once processing internally
+- Idempotency + reconciliation with external PSP
+- Replicas: consensus algorithms (Paxos, Raft) or consensus DBs (YugabyteDB, CockroachDB)
+
+### Payment Security
+
+| Problem | Solution |
+|---------|---------|
+| Eavesdropping | HTTPS |
+| Data tampering | Encryption + integrity monitoring |
+| MITM attack | SSL with certificate pinning |
+| Data loss | DB replication + snapshots |
+| DDoS | Rate limiting + firewall |
+| Card theft | Tokenization |
+| PCI compliance | PCI DSS |
+| Fraud | AVS, CVV, user behavior analysis |
+
+### Java Example – Payment with Idempotency
 
 ```java
 import java.util.*;
 import java.util.concurrent.*;
 
 public class PaymentService {
-    enum PaymentStatus { PENDING, PROCESSING, SUCCESS, FAILED, REFUNDED }
 
-    record Payment(String id, String orderId, double amount, String currency,
-                   String paymentMethod, PaymentStatus status, long timestamp) {}
+    enum Status { NOT_STARTED, EXECUTING, SUCCESS, FAILED }
 
-    record LedgerEntry(String txId, String debitAccount, String creditAccount,
-                       double amount, long timestamp) {}
+    record PaymentOrder(String orderId, String buyer, String amount, Status status) {}
 
-    private final Map<String, Payment> payments = new ConcurrentHashMap<>();
-    private final List<LedgerEntry> ledger = new CopyOnWriteArrayList<>();
-    private final Map<String, Double> wallets = new ConcurrentHashMap<>();
-    private final Set<String> processedIdempotencyKeys = ConcurrentHashMap.newKeySet();
+    private final Map<String, PaymentOrder> paymentDB = new ConcurrentHashMap<>();
+    private final Queue<String> retryQueue = new LinkedList<>();
+    private final Map<String, Integer> retryCounts = new ConcurrentHashMap<>();
+    private static final int MAX_RETRIES = 3;
 
-    public Payment processPayment(String idempotencyKey, String orderId,
-                                   double amount, String currency) {
-        // Idempotency check — prevent double charge
-        if (processedIdempotencyKeys.contains(idempotencyKey)) {
-            System.out.println("⚠️ Duplicate request detected: " + idempotencyKey);
-            return payments.values().stream()
-                .filter(p -> p.orderId().equals(orderId))
-                .findFirst().orElse(null);
+    public String processPayment(String orderId, String buyer, String amount, String currency) {
+        // Idempotency check
+        if (paymentDB.containsKey(orderId)) {
+            System.out.println("Duplicate detected. Status: " + paymentDB.get(orderId).status());
+            return paymentDB.get(orderId).status().toString();
         }
+        paymentDB.put(orderId, new PaymentOrder(orderId, buyer, amount, Status.EXECUTING));
 
-        String paymentId = "PAY-" + UUID.randomUUID().toString().substring(0, 8);
-        Payment payment = new Payment(paymentId, orderId, amount, currency,
-                                       "CREDIT_CARD", PaymentStatus.PROCESSING,
-                                       System.currentTimeMillis());
-        payments.put(paymentId, payment);
+        boolean pspSuccess = Math.random() > 0.4; // Simulate PSP call
+        Status finalStatus = pspSuccess ? Status.SUCCESS : Status.FAILED;
 
-        // Simulate PSP call
-        boolean pspSuccess = simulatePSP(amount);
-
-        PaymentStatus finalStatus = pspSuccess ? PaymentStatus.SUCCESS : PaymentStatus.FAILED;
-        payment = new Payment(paymentId, orderId, amount, currency,
-                               "CREDIT_CARD", finalStatus, payment.timestamp());
-        payments.put(paymentId, payment);
-
-        if (pspSuccess) {
-            // Double-entry ledger
-            ledger.add(new LedgerEntry(paymentId, "customer", "merchant",
-                                        amount, System.currentTimeMillis()));
-            wallets.merge("merchant", amount, Double::sum);
-        }
-
-        processedIdempotencyKeys.add(idempotencyKey);
-        System.out.printf("%s Payment %s: $%.2f [%s]%n",
-            pspSuccess ? "✅" : "❌", paymentId, amount, finalStatus);
-        return payment;
+        if (!pspSuccess) retryQueue.offer(orderId);
+        paymentDB.put(orderId, new PaymentOrder(orderId, buyer, amount, finalStatus));
+        System.out.println("Payment " + orderId + ": " + finalStatus);
+        return finalStatus.toString();
     }
 
-    private boolean simulatePSP(double amount) {
-        return amount < 10000; // Decline large amounts for demo
+    public void processRetries() {
+        while (!retryQueue.isEmpty()) {
+            String orderId = retryQueue.poll();
+            int retries = retryCounts.getOrDefault(orderId, 0);
+            if (retries >= MAX_RETRIES) {
+                System.out.println("Dead letter queue: " + orderId);
+                continue;
+            }
+            retryCounts.put(orderId, retries + 1);
+            PaymentOrder order = paymentDB.get(orderId);
+            // Reset for retry
+            paymentDB.remove(orderId);
+            processPayment(orderId, order.buyer(), order.amount(), "USD");
+        }
     }
 
     public static void main(String[] args) {
         PaymentService service = new PaymentService();
-        service.processPayment("idem-001", "ORD-1001", 99.99, "USD");
-        service.processPayment("idem-002", "ORD-1002", 249.50, "USD");
-        // Duplicate attempt
-        service.processPayment("idem-001", "ORD-1001", 99.99, "USD");
-        // Large amount (will fail)
-        service.processPayment("idem-003", "ORD-1003", 15000.00, "USD");
-
-        System.out.println("\nMerchant balance: $" + service.wallets.getOrDefault("merchant", 0.0));
-        System.out.println("Ledger entries: " + service.ledger.size());
+        service.processPayment("order-001", "alice", "99.99", "USD");
+        service.processPayment("order-001", "alice", "99.99", "USD"); // Idempotency test
+        service.processRetries();
     }
 }
 ```
 
 ---
 
-## Step 3 - Design deep dive
+## Step 4 - Wrap Up
 
-### Exactly-once delivery
-- **Idempotency key**: Client generates unique key per payment attempt → server deduplicates
-- **At-least-once + idempotent operations**: Retry safely
+- Covered: pay-in, pay-out, retry, idempotency, reconciliation, consistency, security
+- Additional: monitoring, alerting, debugging tools, currency exchange, geography-specific payment methods
 
-### Double-entry ledger
-Every transaction creates two entries: one debit and one credit. The sum of all debits must equal the sum of all credits.
+## Reference materials
 
-### Retry and timeout handling
-- PSP call may timeout → use a **reconciliation** process
-- **Exponential backoff** for retries
-- Final status resolution via PSP webhooks or polling
-
-### Consistency
-- Use **saga pattern** for distributed transactions across services (order, payment, inventory)
-- Each step has a compensating action (e.g., refund if inventory check fails)
-
-### Security
-- PCI-DSS compliance
-- Tokenize card numbers (never store raw card data)
-- 3D Secure for additional authentication
-
----
-
-## Step 4 - Wrap up
-
-Additional talking points:
-- **Refund flow**
-- **Multi-currency support**
-- **Fraud detection** (ML-based anomaly detection)
-- **Regulatory compliance** (PCI-DSS, PSD2)
+[1] Payment system: https://en.wikipedia.org/wiki/Payment_system
+[2] AML/CFT: https://en.wikipedia.org/wiki/Money_laundering
+[5] Stripe API: https://stripe.com/docs/api
+[6] Double-entry bookkeeping: https://en.wikipedia.org/wiki/Double-entry_bookkeeping
+[8] PCI DSS: https://en.wikipedia.org/wiki/Payment_Card_Industry_Data_Security_Standard
+[16] Chain Services with Exactly-Once Guarantees: https://www.confluent.io/blog/chain-services-exactly-guarantees/
+[17] Exponential backoff: https://en.wikipedia.org/wiki/Exponential_backoff
+[18] Idempotence: https://en.wikipedia.org/wiki/Idempotence
+[22] Raft: https://raft.github.io/
