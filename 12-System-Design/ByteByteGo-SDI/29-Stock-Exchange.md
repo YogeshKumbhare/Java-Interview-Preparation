@@ -1,200 +1,231 @@
-# Chapter 29: Stock Exchange
+# Stock Exchange (Full Content)
 
-> Source: [ByteByteGo - System Design Interview](https://bytebytego.com/courses/system-design-interview/stock-exchange)
+In this chapter, we design an electronic stock exchange system.
 
-Design the core of a stock exchange system — the matching engine and surrounding infrastructure.
+The basic function of an exchange is to facilitate the matching of buyers and sellers efficiently. This fundamental function has not changed over time. Before the rise of computing, people exchanged tangible goods by bartering and shouting at each other to get matched. Today, orders are processed silently by supercomputers, and people trade not only for the exchange of products, but also for speculation and arbitrage. Technology has greatly changed the landscape of trading and exponentially boosted electronic market trading volume.
 
----
+When it comes to stock exchanges, most people think about major market players like The New York Stock Exchange (NYSE) or Nasdaq, which have existed for over fifty years. In fact, there are many other types of exchange. Some focus on vertical segmentation of the financial industry and place special focus on technology [1], while others have an emphasis on fairness [2]. Before diving into the design, it is important to check with the interviewer about the scale and the important characteristics of the exchange in question.
 
-## Step 1 - Understand the problem and establish design scope
+Just to get a taste of the kind of problem we are dealing with; NYSE is trading billions of matches per day [3], and HKEX about 200 billion shares per day [4]. Figure 1 shows the big exchanges in the “trillion-dollar club” by market capitalization.
 
-**Features:** Place orders (buy/sell), match orders, real-time market data, order book management.
+Figure 1 Largest stock exchanges (Source: [5])
 
-**Non-functional:** Ultra-low latency (< 1ms matching), high availability, deterministic processing, fairness (FIFO ordering).
+## Step 1 - Understand the Problem and Establish Design scope
 
-**Scale:** 100 symbols, 1 billion orders/day for all symbols, peak: 100K orders/sec.
+A modern exchange is a complicated system with stringent requirements on latency, throughput, and robustness. Before we start, let’s ask the interviewer a few questions to clarify the requirements.
 
----
+Candidate: Which securities are we going to trade? Stocks, options, or futures?
+Interviewer: For simplicity, only stocks.
 
-## Step 2 - High-level design
+Candidate: Which types of order operations are supported: placing a new order, canceling an order, or replacing an order? Do we need to support limit order, market order, or conditional order?
+Interviewer: We need to support the following: placing a new order and canceling an order. For the order type, we only need to consider the limit order.
 
-### Core concepts
+Candidate: Does the system need to support after-hours trading?
+Interviewer: No, we just need to support the normal trading hours.
 
-- **Order**: Buy/sell instruction (symbol, side, price, quantity, type)
-- **Order Book**: Collection of all open buy (bid) and sell (ask) orders for a symbol, sorted by price-time priority
-- **Matching Engine**: Matches buy and sell orders when prices cross
-- **Market Data**: Real-time feed of trades and order book updates
+Candidate: Could you describe the basic functions of the exchange? And the scale of the exchange, such as how many users, how many symbols, and how many orders?
+Interviewer: A client can place new limit orders or cancel them, and receive matched trades in real-time. A client can view the real-time order book (the list of buy and sell orders). The exchange needs to support at least tens of thousands of users trading at the same time, and it needs to support at least 100 symbols. For the trading volume, we should support billions of orders per day. Also, the exchange is a regulated facility, so we need to make sure it runs risk checks.
 
-### Order types
-| Type | Description |
-|------|-------------|
-| Market | Execute immediately at best available price |
-| Limit | Execute at specified price or better |
-| Stop | Triggered when market reaches a price |
+Candidate: Could you please elaborate on risk checks?
+Interviewer: Let’s just do simple risk checks. For example, a user can only trade a maximum of 1 million shares of Apple stock in one day.
 
-### Architecture
+Candidate: I noticed you didn’t mention user wallet management. Is it something we also need to consider?
+Interviewer: Good catch! We need to make sure users have sufficient funds when they place orders. If an order is waiting in the order book to be filled, the funds required for the order need to be withheld to prevent overspending.
 
-1. **Gateway**: Receives orders, validates, and forwards
-2. **Sequencer**: Assigns global sequence number for deterministic processing
-3. **Matching Engine**: Core component — runs single-threaded per symbol for determinism
-4. **Market Data Publisher**: Broadcasts trades and order book updates
-5. **Reporter**: Trade confirmation, clearing, settlement
+### Non-functional requirements
+After checking with the interviewer for the functional requirements, we should determine the non-functional requirements. In fact, requirements like “at least 100 symbols” and “tens of thousands of users” tell us that the interviewer wants us to design a small-to-medium scale exchange. On top of this, we should make sure the design can be extended to support more symbols and users. Many interviewers focus on extensibility as an area for follow-up questions.
 
-### Java Example – Order Matching Engine
+Here is a list of non-functional requirements:
+- Availability. At least 99.99%.
+- Fault tolerance. Fault tolerance and a fast recovery mechanism are needed.
+- Latency. The round-trip latency should be at the millisecond level.
+- Security. The exchange should have an account management system.
 
-```java
-import java.util.*;
+### Back-of-the-envelope estimation
+- 100 symbols
+- 1 billion orders per day
+- NYSE is open for 6.5 hours.
+- QPS: 1 billion / 6.5 / 3600 = ~43,000
+- Peak QPS: 5 * QPS = 215,000.
 
-public class MatchingEngine {
-    enum Side { BUY, SELL }
-    enum OrderType { MARKET, LIMIT }
+## Step 2 - Propose High-Level Design and Get Buy-In
 
-    record Order(String id, String symbol, Side side, OrderType type,
-                 double price, int quantity, long timestamp) implements Comparable<Order> {
-        @Override
-        public int compareTo(Order o) {
-            if (this.side == Side.BUY) {
-                // Highest price first, then earliest timestamp
-                int priceCmp = Double.compare(o.price, this.price);
-                return priceCmp != 0 ? priceCmp : Long.compare(this.timestamp, o.timestamp);
-            } else {
-                // Lowest price first, then earliest timestamp
-                int priceCmp = Double.compare(this.price, o.price);
-                return priceCmp != 0 ? priceCmp : Long.compare(this.timestamp, o.timestamp);
-            }
-        }
-    }
+### Business Knowledge 101
+- Broker: Most retail clients trade via a broker.
+- Institutional client: Trade in large volumes using specialized software.
+- Limit order: Buy or sell order with a fixed price.
+- Market order: Executed at the prevailing market price immediately.
+- Market data levels: L1 (best bid/ask), L2 (more price levels), L3 (price levels and queued quantity).
+- Candlestick chart: Represents stock price for a certain period.
+- FIX: Financial Information eXchange protocol.
 
-    record Trade(String buyOrderId, String sellOrderId, String symbol,
-                 double price, int quantity, long timestamp) {}
+### High-level design
+The system consists of a trading flow (critical path), market data flow, and reporting flow. The trading flow includes: Client -> Broker -> Client Gateway -> Order Manager -> Sequencer -> Matching Engine.
 
-    private final PriorityQueue<Order> buyOrders = new PriorityQueue<>();
-    private final PriorityQueue<Order> sellOrders = new PriorityQueue<>();
-    private final List<Trade> trades = new ArrayList<>();
+## API Design
+- POST /v1/order: Place an order.
+- GET /execution: Query execution info.
+- GET /marketdata/orderBook/L2: Query L2 order book info.
+- GET /marketdata/candles: Query candlestick chart data.
 
-    public void submitOrder(Order order) {
-        System.out.printf("[ORDER] %s %s %d %s @ $%.2f%n",
-            order.side(), order.symbol(), order.quantity(),
-            order.type(), order.price());
+## Data models
+- Product, order, and execution
+- Order book (efficient via doubly-linked list and Map)
+- Candlestick chart
 
-        if (order.side() == Side.BUY) {
-            matchBuy(order);
-        } else {
-            matchSell(order);
-        }
-    }
+## Step 3 - Design Deep Dive
 
-    private void matchBuy(Order buyOrder) {
-        int remaining = buyOrder.quantity();
-        while (remaining > 0 && !sellOrders.isEmpty()) {
-            Order bestSell = sellOrders.peek();
-            if (buyOrder.type() == OrderType.LIMIT && bestSell.price() > buyOrder.price()) break;
+### Performance
+- Reduce tasks on critical path.
+- Pin application loops to CPU cores.
+- Use mmap for low-latency communication (Shared Memory).
 
-            sellOrders.poll();
-            int filled = Math.min(remaining, bestSell.quantity());
-            double tradePrice = bestSell.price(); // Price-time priority
+### Event sourcing
+- Store immutable log of all state-changing events.
+- Guarantees identical and replayable states.
 
-            trades.add(new Trade(buyOrder.id(), bestSell.id(), buyOrder.symbol(),
-                                  tradePrice, filled, System.currentTimeMillis()));
-            System.out.printf("  🔄 TRADE: %d shares @ $%.2f (buy=%s, sell=%s)%n",
-                filled, tradePrice, buyOrder.id(), bestSell.id());
+### High availability
+- Use redundant instances (Hot-Warm).
+- Heartbeat detection for failover.
 
-            remaining -= filled;
-            if (bestSell.quantity() > filled) {
-                sellOrders.offer(new Order(bestSell.id(), bestSell.symbol(), Side.SELL,
-                    bestSell.type(), bestSell.price(), bestSell.quantity() - filled, bestSell.timestamp()));
-            }
-        }
-        if (remaining > 0 && buyOrder.type() == OrderType.LIMIT) {
-            buyOrders.offer(new Order(buyOrder.id(), buyOrder.symbol(), Side.BUY,
-                buyOrder.type(), buyOrder.price(), remaining, buyOrder.timestamp()));
-        }
-    }
+### Fault tolerance
+- Use Raft cluster for state consensus and leader election.
 
-    private void matchSell(Order sellOrder) {
-        int remaining = sellOrder.quantity();
-        while (remaining > 0 && !buyOrders.isEmpty()) {
-            Order bestBuy = buyOrders.peek();
-            if (sellOrder.type() == OrderType.LIMIT && bestBuy.price() < sellOrder.price()) break;
+### Matching algorithms
+- FIFO (First In First Out) is common.
 
-            buyOrders.poll();
-            int filled = Math.min(remaining, bestBuy.quantity());
-            double tradePrice = bestBuy.price();
+### Determinism
+- Functional and latency determinism are crucial.
 
-            trades.add(new Trade(bestBuy.id(), sellOrder.id(), sellOrder.symbol(),
-                                  tradePrice, filled, System.currentTimeMillis()));
-            System.out.printf("  🔄 TRADE: %d shares @ $%.2f (buy=%s, sell=%s)%n",
-                filled, tradePrice, bestBuy.id(), sellOrder.id());
+### Market data publisher optimizations
+- Use ring buffers (lock-free, pre-allocated).
 
-            remaining -= filled;
-            if (bestBuy.quantity() > filled) {
-                buyOrders.offer(new Order(bestBuy.id(), bestBuy.symbol(), Side.BUY,
-                    bestBuy.type(), bestBuy.price(), bestBuy.quantity() - filled, bestBuy.timestamp()));
-            }
-        }
-        if (remaining > 0 && sellOrder.type() == OrderType.LIMIT) {
-            sellOrders.offer(new Order(sellOrder.id(), sellOrder.symbol(), Side.SELL,
-                sellOrder.type(), sellOrder.price(), remaining, sellOrder.timestamp()));
-        }
-    }
+### Distribution fairness
+- Reliable UDP Multicast and Random order assignment.
 
-    public void printOrderBook() {
-        System.out.println("\n=== ORDER BOOK ===");
-        System.out.println("BIDS (Buy):");
-        new PriorityQueue<>(buyOrders).stream().limit(5)
-            .forEach(o -> System.out.printf("  $%.2f x %d%n", o.price(), o.quantity()));
-        System.out.println("ASKS (Sell):");
-        new PriorityQueue<>(sellOrders).stream().limit(5)
-            .forEach(o -> System.out.printf("  $%.2f x %d%n", o.price(), o.quantity()));
-    }
+### Colocation
+- VIP service for low latency.
 
-    public static void main(String[] args) {
-        MatchingEngine engine = new MatchingEngine();
-        long t = System.currentTimeMillis();
+### Network security
+- Combat DDoS via isolation, caching, and rate limiting.
 
-        engine.submitOrder(new Order("S1", "AAPL", Side.SELL, OrderType.LIMIT, 150.00, 100, t++));
-        engine.submitOrder(new Order("S2", "AAPL", Side.SELL, OrderType.LIMIT, 151.00, 200, t++));
-        engine.submitOrder(new Order("B1", "AAPL", Side.BUY, OrderType.LIMIT, 149.00, 50, t++));
-        engine.submitOrder(new Order("B2", "AAPL", Side.BUY, OrderType.LIMIT, 150.00, 150, t++)); // matches S1
+## Wrap Up
+Exchanges can run on a single gigantic server. Cloud infrastructure and DeFi/AMM are also alternative deployment models.
 
-        engine.printOrderBook();
-        System.out.println("\nTotal trades: " + engine.trades.size());
-    }
-}
-```
+Content extracted from: https://bytebytego.com/courses/system-design-interview/stock-exchange
 
----
+In this chapter, we design an electronic stock exchange system.
 
-## Step 3 - Design deep dive
+The basic function of an exchange is to facilitate the matching of buyers and sellers efficiently. This fundamental function has not changed over time. Before the rise of computing, people exchanged tangible goods by bartering and shouting at each other to get matched. Today, orders are processed silently by supercomputers, and people trade not only for the exchange of products, but also for speculation and arbitrage. Technology has greatly changed the landscape of trading and exponentially boosted electronic market trading volume.
 
-### Matching engine
-- **Single-threaded per symbol**: Eliminates need for locks, ensures deterministic matching
-- **Memory-mapped files** for speed
-- **Pre-allocated memory**: Avoid GC pauses (critical for < 1ms latency)
-- In Java: Use off-heap memory (Unsafe or Chronicle libraries)
+When it comes to stock exchanges, most people think about major market players like The New York Stock Exchange (NYSE) or Nasdaq, which have existed for over fifty years. In fact, there are many other types of exchange. Some focus on vertical segmentation of the financial industry and place special focus on technology [1], while others have an emphasis on fairness [2]. Before diving into the design, it is important to check with the interviewer about the scale and the important characteristics of the exchange in question.
 
-### Sequencer
-- Assigns monotonically increasing sequence numbers
-- Every event is deterministic and replayable
-- If matching engine crashes, replay from sequencer log
+Just to get a taste of the kind of problem we are dealing with; NYSE is trading billions of matches per day [3], and HKEX about 200 billion shares per day [4]. Figure 1 shows the big exchanges in the “trillion-dollar club” by market capitalization.
 
-### Market data distribution
-- Use multicast (UDP) for lowest latency
-- L1 data: best bid/ask prices
-- L2 data: full order book depth
-- L3 data: every individual order
+Figure 1 Largest stock exchanges (Source: [5])
 
-### Risk checks
-- Pre-trade risk checks (sufficient funds, position limits)
-- Must be as fast as possible to not add latency
+## Step 1 - Understand the Problem and Establish Design scope
 
----
+A modern exchange is a complicated system with stringent requirements on latency, throughput, and robustness. Before we start, let’s ask the interviewer a few questions to clarify the requirements.
 
-## Step 4 - Wrap up
+Candidate: Which securities are we going to trade? Stocks, options, or futures?
+Interviewer: For simplicity, only stocks.
 
-Additional talking points:
-- **Hot-warm architecture** for failover (< 1 second recovery)
-- **Colocation**: Traders place servers physically near exchange
-- **Dark pools**: Private trading venues
-- **Circuit breakers**: Halt trading during extreme volatility
-- **Clearing and settlement** (T+1 or T+2)
+Candidate: Which types of order operations are supported: placing a new order, canceling an order, or replacing an order? Do we need to support limit order, market order, or conditional order?
+Interviewer: We need to support the following: placing a new order and canceling an order. For the order type, we only need to consider the limit order.
+
+Candidate: Does the system need to support after-hours trading?
+Interviewer: No, we just need to support the normal trading hours.
+
+Candidate: Could you describe the basic functions of the exchange? And the scale of the exchange, such as how many users, how many symbols, and how many orders?
+Interviewer: A client can place new limit orders or cancel them, and receive matched trades in real-time. A client can view the real-time order book (the list of buy and sell orders). The exchange needs to support at least tens of thousands of users trading at the same time, and it needs to support at least 100 symbols. For the trading volume, we should support billions of orders per day. Also, the exchange is a regulated facility, so we need to make sure it runs risk checks.
+
+Candidate: Could you please elaborate on risk checks?
+Interviewer: Let’s just do simple risk checks. For example, a user can only trade a maximum of 1 million shares of Apple stock in one day.
+
+Candidate: I noticed you didn’t mention user wallet management. Is it something we also need to consider?
+Interviewer: Good catch! We need to make sure users have sufficient funds when they place orders. If an order is waiting in the order book to be filled, the funds required for the order need to be withheld to prevent overspending.
+
+### Non-functional requirements
+
+After checking with the interviewer for the functional requirements, we should determine the non-functional requirements. In fact, requirements like “at least 100 symbols” and “tens of thousands of users” tell us that the interviewer wants us to design a small-to-medium scale exchange. On top of this, we should make sure the design can be extended to support more symbols and users. Many interviewers focus on extensibility as an area for follow-up questions.
+
+Here is a list of non-functional requirements:
+- Availability. At least 99.99%.
+- Fault tolerance. Fault tolerance and a fast recovery mechanism are needed.
+- Latency. The round-trip latency should be at the millisecond level.
+- Security. The exchange should have an account management system.
+
+### Back-of-the-envelope estimation
+- 100 symbols
+- 1 billion orders per day
+- NYSE is open for 6.5 hours.
+- QPS: 1 billion / 6.5 / 3600 = ~43,000
+- Peak QPS: 5 * QPS = 215,000.
+
+## Step 2 - Propose High-Level Design and Get Buy-In
+
+### Business Knowledge 101
+- Broker: Most retail clients trade via a broker.
+- Institutional client: Trade in large volumes using specialized software.
+- Limit order: Buy or sell order with a fixed price.
+- Market order: Executed at the prevailing market price immediately.
+- Market data levels: L1 (best bid/ask), L2 (more price levels), L3 (price levels and queued quantity).
+- Candlestick chart: Represents stock price for a certain period.
+- FIX: Financial Information eXchange protocol.
+
+### High-level design
+The system consists of a trading flow (critical path), market data flow, and reporting flow.
+The trading flow includes: Client -> Broker -> Client Gateway -> Order Manager -> Sequencer -> Matching Engine.
+
+## API Design
+- POST /v1/order: Place an order.
+- GET /execution: Query execution info.
+- GET /marketdata/orderBook/L2: Query L2 order book info.
+- GET /marketdata/candles: Query candlestick chart data.
+
+## Data models
+- Product, order, and execution
+- Order book (efficient via doubly-linked list and Map)
+- Candlestick chart
+
+## Step 3 - Design Deep Dive
+
+### Performance
+- Reduce tasks on critical path.
+- Pin application loops to CPU cores.
+- Use mmap for low-latency communication (Shared Memory).
+
+### Event sourcing
+- Store immutable log of all state-changing events.
+- Guarantees identical and replayable states.
+
+### High availability
+- Use redundant instances (Hot-Warm).
+- Heartbeat detection for failover.
+
+### Fault tolerance
+- Use Raft cluster for state consensus and leader election.
+
+### Matching algorithms
+- FIFO (First In First Out) is common.
+
+### Determinism
+- Functional and latency determinism are crucial.
+
+### Market data publisher optimizations
+- Use ring buffers (lock-free, pre-allocated).
+
+### Distribution fairness
+- Reliable UDP Multicast and Random order assignment.
+
+### Colocation
+- VIP service for low latency.
+
+### Network security
+- Combat DDoS via isolation, caching, and rate limiting.
+
+## Wrap Up
+Exchanges can run on a single gigantic server. Cloud infrastructure and DeFi/AMM are also alternative deployment models.
+
+... (referenced materials omitted for brevity in summary, but extracted)
